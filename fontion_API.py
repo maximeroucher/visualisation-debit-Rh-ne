@@ -23,7 +23,12 @@ def get_data_debit(date_debut="2020-01-01", date_fin="2024-01-01", month=True, c
         grandeur_hydro = "QmnJ"
     url = f'https://hubeau.eaufrance.fr/api/v2/hydrometrie/obs_elab?code_entite={code_entite}&date_debut_obs_elab={date_debut}&date_fin_obs_elab={date_fin}&grandeur_hydro_elab={grandeur_hydro}&size={size}'
     data = get_data(url)
-    return data
+    list_data = data["data"]
+    while data["next"] is not None:
+        url = data["next"]
+        data = get_data(url)
+        list_data += data["data"]
+    return list_data
 
 def build_graph(confluence, uniquemerged_array):
     def group_points_by_river(uniquemerged_array):
@@ -38,21 +43,30 @@ def build_graph(confluence, uniquemerged_array):
     grouped_points = group_points_by_river(uniquemerged_array)
     graph = []
     for river, points in grouped_points.items():
+        rhone_distance = next((r["distance_rhone"] for id, r in confluence.iterrows() if r["riviere"] == river), None)
+        sort_points = sorted(points, key=lambda x: x["distance"], reverse=True)
         # Ajouter les liens entre les points de la rivière
-        for i in range(len(points) - 1):
+        for i in range(len(sort_points) - 1):
             graph.append({
-                "source": f"{points[i]['river_name']}_{points[i]['distance']}",
-                "target": f"{points[i + 1]['river_name']}_{points[i + 1]['distance']}",
-                "value": points[i]['resultat_obs_elab'],
-                "distance": points[i]['distance']
+                "source": f"{sort_points[i]['river_name']}_{sort_points[i]['distance']}",
+                "target": f"{sort_points[i + 1]['river_name']}_{sort_points[i + 1]['distance']}",
+                "value": sort_points[i]['resultat_obs_elab'],
+                "distance_end": sort_points[i]['distance'] + rhone_distance if river != "Le Rhône" else sort_points[i]['distance'],
+                "code_site": sort_points[i]['code_site']
             })
         
         # Gérer le dernier point
-        last_point = points[-1]
+        last_point = sort_points[-1]
         if river == "Le Rhône":
+            graph.append({
+                "source": f"{last_point['river_name']}_{last_point['distance']}",
+                "target": "La mer Méditerranée",
+                "value": last_point['resultat_obs_elab'],
+                "distance_end": last_point['distance'],
+                "code_site": last_point['code_site']
+            })
             continue  # Aucun lien supplémentaire pour Le Rhône
         
-        rhone_distance = next((r["distance_rhone"] for id, r in confluence.iterrows() if r["riviere"] == river), None)
         if rhone_distance is None:
             continue
         
@@ -63,14 +77,16 @@ def build_graph(confluence, uniquemerged_array):
                 "source": f"{last_point['river_name']}_{last_point['distance']}",
                 "target": f"{closest_point['river_name']}_{closest_point['distance']}",
                 "value": last_point['resultat_obs_elab'],
-                "distance": last_point['distance']
+                "distance_end": last_point['distance'] + rhone_distance,
+                "code_site": last_point['code_site']
             })
     graph = pd.DataFrame(graph)
+    # si un point à la meme source et target on l'enleve
+    graph = graph.loc[graph["source"] != graph["target"]]
     return graph
 
 def create_graph(site_affluent_rhone, confluence, date="2024-01-01", month=False):
-    response = get_data_debit(date_debut=date, date_fin=date, month=month, code_entite="")
-    data = pd.DataFrame(response["data"])
+    data = pd.DataFrame(get_data_debit(date_debut=date, date_fin=date, month=month, code_entite=""))
     data = pd.merge(data, site_affluent_rhone, on="code_site", how="inner", suffixes=("", "_y"))
     data = data.drop_duplicates(subset="code_site", keep="first")
     graph = build_graph(confluence, data)
